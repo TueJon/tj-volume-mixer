@@ -1,231 +1,216 @@
-// Content script that monitors for new media elements and applies saved volume
+// TJ Volume Mixer — content script.
+// Runs in every frame (manifest all_frames). Applies the saved per-origin
+// volume/boost to all media elements and keeps them in sync with the popup.
+(function () {
+  "use strict";
 
-const VOLUME_CHANGE_THRESHOLD = 0.01; // Threshold for detecting meaningful volume changes
-const VOLUME_SAVE_DEBOUNCE_MS = 250; // Debounce time for saving volume changes
-
-let currentTabId = null;
-let currentUrl = getCurrentUrl(); // Use origin (protocol + domain) as persistent key
-let savedVolume = 1.0; // Default volume (scale 0 to 1)
-let isApplyingVolume = false; // Flag to prevent recursive updates
-let volumeSaveTimeout = null; // Timeout for debouncing volume saves
-
-// Get current URL origin for storage key (only for http(s) URLs)
-function getCurrentUrl() {
-  try {
-    const url = new URL(window.location.href);
-    if (url.protocol === 'http:' || url.protocol === 'https:') {
-      return url.origin;
-    }
-  } catch (e) {
-    console.warn('[TJ Volume Mixer] Failed to get current URL:', e);
+  var Core = typeof TJVolumeCore !== "undefined" ? TJVolumeCore : self.TJVolumeCore;
+  if (!Core) {
+    console.error("[TJ Volume Mixer] core helpers missing — content script aborting");
+    return;
   }
-  return null;
-}
 
-// Update currentUrl when the page navigates (for SPAs)
-function updateCurrentUrl() {
-  const newUrl = getCurrentUrl();
-  if (newUrl && newUrl !== currentUrl) {
-    currentUrl = newUrl;
-    console.log(`[TJ Volume Mixer] URL changed to: ${currentUrl}`);
-    loadVolumeSettings(); // Reload volume settings for new URL
+  var SAVE_DEBOUNCE_MS = 250;
+  var DEBUG = false;
+
+  var origin = Core.originKey(location.href);
+  var multiplier = 1; // 1 = 100%
+  var applying = false; // guard against our own volumechange events
+  var saveTimer = null;
+
+  var audioCtx = null;
+  var gainNodes = new WeakMap(); // mediaEl -> { source, gain }
+
+  function log() {
+    if (DEBUG) console.log.apply(console, ["[TJ Volume Mixer]"].concat([].slice.call(arguments)));
   }
-}
 
-// Get the current tab ID
-chrome.runtime.sendMessage({ action: "getTabId" }, (response) => {
-  if (response && response.tabId) {
-    currentTabId = response.tabId;
-    loadVolumeSettings();
+  function isMedia(el) {
+    return el && (el.tagName === "AUDIO" || el.tagName === "VIDEO");
   }
-});
 
-// Load saved volume settings from storage
-function loadVolumeSettings() {
-  if (!currentTabId) return;
-  
-  // Check both URL-based and tab-based storage for backwards compatibility
-  chrome.storage.local.get("volumes", (result) => {
-    if (result.volumes) {
-      // Prefer URL-based storage for persistence across sessions (only for http(s))
-      if (currentUrl && result.volumes[currentUrl] !== undefined) {
-        savedVolume = result.volumes[currentUrl];
-        console.log(`[TJ Volume Mixer] Loaded saved volume for URL ${currentUrl}: ${savedVolume}`);
-      } else if (result.volumes[currentTabId] !== undefined) {
-        // Fall back to tab-based for current session or non-http(s) pages
-        savedVolume = result.volumes[currentTabId];
-        console.log(`[TJ Volume Mixer] Loaded saved volume for tab ${currentTabId}: ${savedVolume}`);
-      }
-      applyVolumeToAllMedia();
-    }
-  });
-}
-
-// Listen for volume changes from storage (from extension UI)
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName === "local" && changes.volumes) {
-    const newVolumes = changes.volumes.newValue;
-    if (newVolumes) {
-      // Check URL-based storage first (only for http(s)), then tab-based
-      if (currentUrl && newVolumes[currentUrl] !== undefined) {
-        savedVolume = newVolumes[currentUrl];
-        console.log(`[TJ Volume Mixer] Volume updated for URL ${currentUrl}: ${savedVolume}`);
-        applyVolumeToAllMedia();
-      } else if (currentTabId && newVolumes[currentTabId] !== undefined) {
-        savedVolume = newVolumes[currentTabId];
-        console.log(`[TJ Volume Mixer] Volume updated for tab ${currentTabId}: ${savedVolume}`);
-        applyVolumeToAllMedia();
+  function ensureCtx() {
+    if (!audioCtx) {
+      var Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return null;
+      try {
+        audioCtx = new Ctx();
+      } catch (e) {
+        log("AudioContext unavailable", e);
+        return null;
       }
     }
+    if (audioCtx.state === "suspended") audioCtx.resume().catch(function () {});
+    return audioCtx;
   }
-});
 
-// Helper function to check if element is a media element
-function isMediaElement(element) {
-  return element && (element.tagName === "AUDIO" || element.tagName === "VIDEO");
-}
-
-// Apply saved volume to a specific media element
-function applyVolumeToElement(element) {
-  if (element.volume !== savedVolume) {
-    isApplyingVolume = true;
-    element.volume = savedVolume;
-    console.log(`[TJ Volume Mixer] Applied volume ${savedVolume} to media element`);
-    // Add event listener for volume changes if not already added
-    if (!element.dataset.tjVolumeListenerAttached) {
-      element.addEventListener('volumechange', handleVolumeChange);
-      element.dataset.tjVolumeListenerAttached = 'true';
-    }
-    isApplyingVolume = false;
-  } else if (!element.dataset.tjVolumeListenerAttached) {
-    // Still attach listener even if volume matches
-    element.addEventListener('volumechange', handleVolumeChange);
-    element.dataset.tjVolumeListenerAttached = 'true';
-  }
-}
-
-// Handle volume changes from the media element itself (e.g., YouTube's volume slider)
-function handleVolumeChange(event) {
-  // Ignore if we're the ones applying the volume
-  if (isApplyingVolume) return;
-  
-  const element = event.target;
-  if (isMediaElement(element)) {
-    const newVolume = element.volume;
-    
-    // Only update if volume actually changed
-    if (Math.abs(newVolume - savedVolume) >= VOLUME_CHANGE_THRESHOLD) {
-      savedVolume = newVolume;
-      console.log(`[TJ Volume Mixer] Detected volume change on media element: ${newVolume}`);
-      
-      // Debounce storage updates to avoid race conditions
-      if (volumeSaveTimeout) {
-        clearTimeout(volumeSaveTimeout);
-      }
-      
-      volumeSaveTimeout = setTimeout(() => {
-        // Save to storage with both URL and tabId
-        chrome.storage.local.get("volumes", (result) => {
-          const volumes = result.volumes || {};
-          if (currentUrl) {
-            volumes[currentUrl] = newVolume; // Persist by URL (only for http(s))
-          }
-          if (currentTabId) {
-            volumes[currentTabId] = newVolume; // Also update tab-based for current session
-          }
-          chrome.storage.local.set({ volumes: volumes });
-        });
-      }, VOLUME_SAVE_DEBOUNCE_MS);
+  // Lazily route an element through a GainNode. Returns the gain node or null
+  // (when Web Audio is unavailable, the element is already wired, or the media
+  // is cross-origin and would be tainted — caller falls back to el.volume).
+  function getGain(el) {
+    var existing = gainNodes.get(el);
+    if (existing) return existing.gain;
+    var ctx = ensureCtx();
+    if (!ctx) return null;
+    try {
+      var source = ctx.createMediaElementSource(el);
+      var gain = ctx.createGain();
+      source.connect(gain);
+      gain.connect(ctx.destination);
+      gainNodes.set(el, { source: source, gain: gain });
+      el.volume = 1; // gain governs level from now on
+      log("gain node attached");
+      return gain;
+    } catch (e) {
+      log("createMediaElementSource failed:", e && e.name);
+      return null;
     }
   }
-}
 
-// Apply saved volume to all media elements
-function applyVolumeToAllMedia() {
-  const mediaElements = document.querySelectorAll("audio, video");
-  mediaElements.forEach((el) => {
-    applyVolumeToElement(el);
-  });
-}
+  function attachListener(el) {
+    if (el.dataset.tjvmListener) return;
+    el.dataset.tjvmListener = "1";
+    el.addEventListener("volumechange", onVolumeChange);
+  }
 
-// Monitor for new media elements using MutationObserver
-const observer = new MutationObserver((mutations) => {
-  mutations.forEach((mutation) => {
-    mutation.addedNodes.forEach((node) => {
-      // Check if the added node is a media element
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        if (isMediaElement(node)) {
-          applyVolumeToElement(node);
-          console.log(`[TJ Volume Mixer] New media element detected, applied volume: ${savedVolume}`);
-        }
-        
-        // Check if any descendants are media elements
-        const mediaChildren = node.querySelectorAll("audio, video");
-        if (mediaChildren.length > 0) {
-          mediaChildren.forEach((el) => {
-            applyVolumeToElement(el);
-          });
-          console.log(`[TJ Volume Mixer] New media elements detected in subtree, applied volume: ${savedVolume}`);
-        }
+  function applyToElement(el) {
+    var plan = Core.decideApplication(multiplier, gainNodes.has(el));
+    applying = true;
+    try {
+      if (plan.method === "gain") {
+        var g = getGain(el);
+        if (g) g.gain.value = plan.value;
+        else el.volume = Math.min(plan.value, 1); // boost impossible -> cap at 100%
+      } else {
+        el.volume = plan.value;
       }
+    } catch (e) {
+      log("apply error", e);
+    }
+    applying = false;
+    attachListener(el);
+  }
+
+  function applyAll() {
+    var media = document.querySelectorAll("audio, video");
+    for (var i = 0; i < media.length; i++) applyToElement(media[i]);
+  }
+
+  // Track manual volume changes made on the page itself (e.g. YouTube slider),
+  // but only while we're NOT routing through a gain node (gain decouples
+  // el.volume from the audible level, so it's no longer a reliable signal).
+  function onVolumeChange(e) {
+    if (applying || gainNodes.has(e.target)) return;
+    var v = e.target.volume;
+    if (Math.abs(v - multiplier) < 0.01) return;
+    multiplier = v;
+    save();
+  }
+
+  function save() {
+    if (!origin) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(function () {
+      chrome.storage.local.get(Core.STORAGE_KEY, function (res) {
+        var map = (res && res[Core.STORAGE_KEY]) || {};
+        map[origin] = multiplier;
+        var payload = {};
+        payload[Core.STORAGE_KEY] = map;
+        chrome.storage.local.set(payload);
+      });
+    }, SAVE_DEBOUNCE_MS);
+  }
+
+  function load(done) {
+    chrome.storage.local.get([Core.STORAGE_KEY, Core.LEGACY_KEY], function (res) {
+      var map = Core.migrateLegacy(res || {});
+      if (origin && map[origin] !== undefined) multiplier = map[origin];
+      if (done) done();
     });
+  }
+
+  // Persisted updates from the popup commit or another same-origin tab.
+  chrome.storage.onChanged.addListener(function (changes, area) {
+    if (area !== "local" || !changes[Core.STORAGE_KEY]) return;
+    var nv = changes[Core.STORAGE_KEY].newValue || {};
+    if (origin && nv[origin] !== undefined && nv[origin] !== multiplier) {
+      multiplier = nv[origin];
+      applyAll();
+    }
   });
-});
 
-// Start observing the document
-observer.observe(document.documentElement, {
-  childList: true,
-  subtree: true,
-});
+  // Live preview while the popup slider is being dragged (not yet persisted).
+  chrome.runtime.onMessage.addListener(function (msg) {
+    if (msg && msg.action === "tjvm:preview" && typeof msg.multiplier === "number") {
+      multiplier = msg.multiplier;
+      applyAll();
+    }
+  });
 
-// Note: applyVolumeToAllMedia() is called from loadVolumeSettings() after loading saved volume
-// This ensures we apply the correct saved volume, not the default value
+  // Catch media elements added after load.
+  var observer = new MutationObserver(function (mutations) {
+    for (var i = 0; i < mutations.length; i++) {
+      var added = mutations[i].addedNodes;
+      for (var j = 0; j < added.length; j++) {
+        var node = added[j];
+        if (node.nodeType !== 1) continue;
+        if (isMedia(node)) applyToElement(node);
+        if (node.querySelectorAll) {
+          var kids = node.querySelectorAll("audio, video");
+          for (var k = 0; k < kids.length; k++) applyToElement(kids[k]);
+        }
+      }
+    }
+  });
+  observer.observe(document.documentElement, { childList: true, subtree: true });
 
-// Listen for media element events to catch dynamically loaded sources
-document.addEventListener("loadedmetadata", (event) => {
-  if (isMediaElement(event.target)) {
-    applyVolumeToElement(event.target);
-    console.log(`[TJ Volume Mixer] Media loadedmetadata event, applied volume: ${savedVolume}`);
+  document.addEventListener(
+    "loadedmetadata",
+    function (e) {
+      if (isMedia(e.target)) applyToElement(e.target);
+    },
+    true
+  );
+  document.addEventListener(
+    "canplay",
+    function (e) {
+      if (isMedia(e.target)) applyToElement(e.target);
+    },
+    true
+  );
+
+  // SPA navigation: re-load settings if the origin changes.
+  function onNavigate() {
+    var next = Core.originKey(location.href);
+    if (next !== origin) {
+      origin = next;
+      multiplier = 1;
+      load(applyAll);
+    }
   }
-}, true);
+  window.addEventListener("popstate", onNavigate);
+  var _push = history.pushState;
+  history.pushState = function () {
+    _push.apply(this, arguments);
+    onNavigate();
+  };
+  var _replace = history.replaceState;
+  history.replaceState = function () {
+    _replace.apply(this, arguments);
+    onNavigate();
+  };
 
-document.addEventListener("canplay", (event) => {
-  if (isMediaElement(event.target)) {
-    applyVolumeToElement(event.target);
-    console.log(`[TJ Volume Mixer] Media canplay event, applied volume: ${savedVolume}`);
-  }
-}, true);
+  // Autoplay policy: a suspended AudioContext resumes on the first user gesture.
+  ["click", "keydown", "touchstart"].forEach(function (ev) {
+    window.addEventListener(
+      ev,
+      function () {
+        if (audioCtx && audioCtx.state === "suspended") audioCtx.resume().catch(function () {});
+      },
+      { once: true, capture: true }
+    );
+  });
 
-// Monitor for URL changes in SPAs (using MutationObserver on document.title and popstate events)
-let lastUrl = window.location.href;
-const urlObserver = new MutationObserver(() => {
-  const currentHref = window.location.href;
-  if (currentHref !== lastUrl) {
-    lastUrl = currentHref;
-    updateCurrentUrl();
-  }
-});
-
-urlObserver.observe(document.querySelector('title') || document.documentElement, {
-  childList: true,
-  subtree: true
-});
-
-// Also listen for popstate events (back/forward navigation)
-window.addEventListener('popstate', updateCurrentUrl);
-
-// And pushState/replaceState for SPA navigation
-const originalPushState = history.pushState;
-const originalReplaceState = history.replaceState;
-
-history.pushState = function(...args) {
-  originalPushState.apply(this, args);
-  updateCurrentUrl();
-};
-
-history.replaceState = function(...args) {
-  originalReplaceState.apply(this, args);
-  updateCurrentUrl();
-};
-
-console.log("[TJ Volume Mixer] Content script loaded and monitoring for media elements");
+  load(applyAll);
+  log("content script ready; origin =", origin);
+})();
