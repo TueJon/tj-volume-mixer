@@ -1,253 +1,207 @@
-import React, { useEffect, useState } from "react";
-import { List, ListItem, ListItemAvatar, Avatar, ListItemText, Typography, Box } from "@mui/material";
+import React, { useCallback, useEffect, useState } from "react";
+import {
+  List,
+  ListItem,
+  ListItemAvatar,
+  Avatar,
+  ListItemText,
+  Typography,
+  Box,
+  CircularProgress,
+} from "@mui/material";
 import "./popup.css";
 import Header from "./Header";
 import VolumeSlider from "./components/VolumeSlider";
 
+const Core = (typeof window !== "undefined" && window.TJVolumeCore) || {
+  STORAGE_KEY: "siteVolumes",
+  LEGACY_KEY: "volumes",
+  DEFAULT_PERCENT: 100,
+  originKey: () => null,
+  migrateLegacy: () => ({}),
+  percentToMultiplier: (p) => p / 100,
+  multiplierToPercent: (m) => Math.round(m * 100),
+};
+
+// Persistence key for a tab: its origin (http/https) or a session-only tab key.
+function keyForTab(tab) {
+  const origin = tab.url ? Core.originKey(tab.url) : null;
+  return origin || `tab:${tab.id}`;
+}
+function isPersistent(key) {
+  return key.indexOf("://") !== -1;
+}
+
 export default function Popup() {
   const [tabs, setTabs] = useState([]);
-  // volumes holds persisted values (scale 0 to 1)
+  const [loading, setLoading] = useState(true);
+  // multipliers keyed by origin (persisted) or `tab:<id>` (session only)
   const [volumes, setVolumes] = useState({});
-  // muteStates holds mute state for each tab
   const [muteStates, setMuteStates] = useState({});
 
-  // Load saved volume settings.
+  // Detect tabs that have media and load persisted per-site volumes.
   useEffect(() => {
-    chrome.storage.local.get("volumes", (result) => {
-      if (result.volumes) {
-        setVolumes(result.volumes);
-      }
+    let cancelled = false;
+    chrome.storage.local.get([Core.STORAGE_KEY, Core.LEGACY_KEY], (stored) => {
+      const persisted = Core.migrateLegacy(stored || {});
+      chrome.tabs.query({}, (allTabs) => {
+        const checks = allTabs.map(
+          (tab) =>
+            new Promise((resolve) => {
+              if (tab.audible) return resolve({ tab, hasMedia: true });
+              chrome.scripting.executeScript(
+                {
+                  target: { tabId: tab.id, allFrames: true },
+                  func: () => {
+                    const m = document.querySelectorAll("audio, video");
+                    for (const el of m) {
+                      if ((el.currentSrc && el.currentSrc.trim()) || (el.src && el.src.trim())) return true;
+                    }
+                    return false;
+                  },
+                },
+                (results) => {
+                  if (chrome.runtime.lastError || !results) return resolve({ tab, hasMedia: false });
+                  const hasMedia = results.some((r) => r && r.result);
+                  resolve({ tab, hasMedia });
+                }
+              );
+            })
+        );
+        Promise.all(checks).then((res) => {
+          if (cancelled) return;
+          const mediaTabs = res.filter((r) => r.hasMedia).map((r) => r.tab);
+          const vol = { ...persisted };
+          const mutes = {};
+          mediaTabs.forEach((tab) => {
+            mutes[tab.id] = tab.mutedInfo ? tab.mutedInfo.muted : false;
+          });
+          setVolumes(vol);
+          setMuteStates(mutes);
+          setTabs(mediaTabs);
+          setLoading(false);
+        });
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const percentForTab = useCallback(
+    (tab) => {
+      const key = keyForTab(tab);
+      const m = volumes[key];
+      return m === undefined ? Core.DEFAULT_PERCENT : Core.multiplierToPercent(m);
+    },
+    [volumes]
+  );
+
+  // Live preview while dragging — message all frames' content scripts.
+  const handleLive = useCallback((tabId, percent) => {
+    chrome.tabs.sendMessage(tabId, { action: "tjvm:preview", multiplier: Core.percentToMultiplier(percent) }, () => {
+      void chrome.runtime.lastError; // tab may have no content script (e.g. chrome://)
     });
   }, []);
 
-  // Query tabs and check for media; initialize slider values and mute states.
-  useEffect(() => {
-    chrome.tabs.query({}, (allTabs) => {
-      const promises = allTabs.map((tab) => {
-        return new Promise((resolve) => {
-          if (tab.audible) {
-            resolve({ tab, hasMedia: true });
-          } else {
-            chrome.scripting.executeScript(
-              {
-                target: { tabId: tab.id },
-                func: () => {
-                  const mediaElements = document.querySelectorAll("audio, video");
-                  for (const media of mediaElements) {
-                    if (
-                      (media.currentSrc && media.currentSrc.trim() !== "") ||
-                      (media.src && media.src.trim() !== "")
-                    ) {
-                      return true;
-                    }
-                  }
-                  return false;
-                },
-              },
-              (results) => {
-                if (chrome.runtime.lastError || !results || results.length === 0) {
-                  resolve({ tab, hasMedia: false });
-                } else {
-                  let hasMedia = results[0].result;
-                  if (!hasMedia && tab.url && tab.url.includes("twitch.tv")) {
-                    hasMedia = true;
-                  }
-                  resolve({ tab, hasMedia });
-                }
-              }
-            );
-          }
-        });
-      });
-
-      Promise.all(promises).then((results) => {
-        const mediaTabs = results.filter((item) => item.hasMedia).map((item) => item.tab);
-        setTabs(mediaTabs);
-        // Initialize muteStates based on current tab muted info.
-        const initialMuteStates = {};
-        mediaTabs.forEach((tab) => {
-          initialMuteStates[tab.id] = tab.mutedInfo ? tab.mutedInfo.muted : false;
-        });
-        setMuteStates(initialMuteStates);
-      });
-    });
-  }, [volumes]);
-
-  // Live update: send volume change messages immediately.
-  const handleVolumeLiveChange = (tabId, value) => {
-    const volume = value / 100;
-    chrome.runtime.sendMessage(
-      {
-        action: "setVolume",
-        tabId: tabId,
-        volume: volume,
-      },
-      () => {
-        console.log(`Live volume update for tab ${tabId}`);
-      }
-    );
-  };
-
-  const handleVolumeCommitChange = (tabId, value) => {
-    const volume = value / 100;
-    
-    // Get the tab's URL to use as persistent key
-    chrome.tabs.get(tabId, (tab) => {
-      if (tab && tab.url) {
-        try {
-          // Only use origin for http(s) URLs, skip chrome://, about:, etc.
-          const url = new URL(tab.url);
-          if (url.protocol === 'http:' || url.protocol === 'https:') {
-            const urlKey = url.origin;
-            
-            setVolumes((prev) => {
-              const newVolumes = { ...prev };
-              newVolumes[tabId] = volume; // Keep tab-based for current session
-              newVolumes[urlKey] = volume; // Add URL-based for persistence
-              chrome.storage.local.set({ volumes: newVolumes });
-              return newVolumes;
-            });
-            console.log(`Volume committed for tab ${tabId} and URL ${urlKey}`);
-          } else {
-            // For non-http(s) URLs, only save by tab ID
-            setVolumes((prev) => {
-              const newVolumes = { ...prev, [tabId]: volume };
-              chrome.storage.local.set({ volumes: newVolumes });
-              return newVolumes;
-            });
-            console.log(`Volume committed for tab ${tabId} (non-http URL)`);
-          }
-        } catch (e) {
-          // Fallback to tab-based only if URL parsing fails
-          console.error(`Failed to parse URL: ${e.message}`);
-          setVolumes((prev) => {
-            const newVolumes = { ...prev, [tabId]: volume };
-            chrome.storage.local.set({ volumes: newVolumes });
-            return newVolumes;
+  // Commit — persist per origin (http/https) and reflect in state.
+  const handleCommit = useCallback(
+    (tabId, percent) => {
+      const multiplier = Core.percentToMultiplier(percent);
+      chrome.tabs.get(tabId, (tab) => {
+        if (chrome.runtime.lastError || !tab) return;
+        const key = keyForTab(tab);
+        if (isPersistent(key)) {
+          chrome.storage.local.get(Core.STORAGE_KEY, (res) => {
+            const map = (res && res[Core.STORAGE_KEY]) || {};
+            map[key] = multiplier;
+            chrome.storage.local.set({ [Core.STORAGE_KEY]: map });
           });
+        } else {
+          // non-http(s): can't persist; keep applying for this session only
+          handleLive(tabId, percent);
         }
-      }
-    });
-  };
+        setVolumes((prev) => ({ ...prev, [key]: multiplier }));
+      });
+    },
+    [handleLive]
+  );
 
-  // Toggle mute state for a given tab.
-  const handleToggleMute = (tabId) => {
-    const currentMute = muteStates[tabId] || false;
-    const newMute = !currentMute;
-    chrome.tabs.update(tabId, { muted: newMute }, () => {
-      setMuteStates((prev) => ({ ...prev, [tabId]: newMute }));
-      console.log(`Mute toggled for tab ${tabId}: ${newMute}`);
-    });
-  };
+  const handleReset = useCallback(
+    (tabId) => {
+      handleLive(tabId, Core.DEFAULT_PERCENT);
+      handleCommit(tabId, Core.DEFAULT_PERCENT);
+    },
+    [handleLive, handleCommit]
+  );
 
-  const TabList = () => {
-    return (
-      <div className="list-container">
-        <List
-          disablePadding
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: "10px",
-          }}
-        >
-          {tabs.map((tab) => {
-            // Check both URL-based and tab-based storage, preferring URL-based
-            let currentVolume = 100;
-            try {
-              if (tab.url) {
-                const url = new URL(tab.url);
-                // Only use URL-based storage for http(s) URLs
-                if (url.protocol === 'http:' || url.protocol === 'https:') {
-                  const urlKey = url.origin;
-                  if (volumes[urlKey] !== undefined) {
-                    currentVolume = volumes[urlKey] * 100;
-                  } else if (volumes[tab.id] !== undefined) {
-                    currentVolume = volumes[tab.id] * 100;
-                  }
-                } else {
-                  // For non-http(s) URLs, only use tab-based storage
-                  currentVolume = volumes[tab.id] !== undefined ? volumes[tab.id] * 100 : 100;
-                }
-              } else {
-                // No URL, use tab-based only
-                currentVolume = volumes[tab.id] !== undefined ? volumes[tab.id] * 100 : 100;
-              }
-            } catch (e) {
-              // Fallback to tab-based if URL parsing fails
-              currentVolume = volumes[tab.id] !== undefined ? volumes[tab.id] * 100 : 100;
-            }
-            return (
-              <ListItem
-                key={tab.id}
-                className="list-item"
-                disablePadding
-                style={{
-                  flexDirection: "column",
-                  alignItems: "flex-start",
-                }}
-              >
-                <Box display="flex" width="100%" alignItems="center">
-                  <ListItemAvatar style={{ minWidth: 35 }}>
-                    <Avatar
-                      sx={{ width: 35, height: 35, margin: "0 0 22px 10px" }}
-                      variant="square"
-                      src={tab.favIconUrl || "default-icon.png"}
-                    />
-                  </ListItemAvatar>
-                  <Box
-                    width="100%"
-                    sx={{
-                      minWidth: 0,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      padding: "0px 0px 15px 25px",
-                    }}
-                  >
-                    <ListItemText
-                      primaryTypographyProps={{
-                        style: {
-                          fontSize: "0.9rem",
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                          whiteSpace: "nowrap",
-                          display: "block",
-                        },
-                      }}
-                      primary={tab.title || tab.url}
-                    />
-                    <VolumeSlider
-                      tabId={tab.id}
-                      initialValue={currentVolume}
-                      isMuted={muteStates[tab.id]}
-                      onLiveChange={handleVolumeLiveChange}
-                      onCommitChange={handleVolumeCommitChange}
-                      onToggleMute={handleToggleMute}
-                    />
-                  </Box>
-                </Box>
-              </ListItem>
-            );
-          })}
-        </List>
-      </div>
-    );
-  };
+  const handleToggleMute = useCallback((tabId) => {
+    setMuteStates((prev) => {
+      const next = !prev[tabId];
+      chrome.tabs.update(tabId, { muted: next });
+      return { ...prev, [tabId]: next };
+    });
+  }, []);
 
   return (
-    <>
+    <Box sx={{ minWidth: 340, maxWidth: 420 }}>
       <Header />
-      {tabs.length === 0 ? (
-        <Typography style={{ textAlign: "center" }}>No tab is playing audio.</Typography>
+      {loading ? (
+        <Box sx={{ display: "flex", justifyContent: "center", py: 4 }}>
+          <CircularProgress size={28} />
+        </Box>
+      ) : tabs.length === 0 ? (
+        <Box sx={{ px: 2, py: 4, textAlign: "center" }}>
+          <Typography variant="body2" sx={{ opacity: 0.8 }}>
+            No tab is playing audio.
+          </Typography>
+          <Typography variant="caption" sx={{ opacity: 0.55 }}>
+            Start media in a tab, then reopen this popup.
+          </Typography>
+        </Box>
       ) : (
-        <TabList />
+        <div className="list-container">
+          <List disablePadding sx={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            {tabs.map((tab) => {
+              const key = keyForTab(tab);
+              return (
+                <ListItem key={tab.id} className="list-item" disablePadding sx={{ flexDirection: "column", alignItems: "stretch", py: 0.5 }}>
+                  <Box display="flex" alignItems="center" gap={1} sx={{ minWidth: 0, mb: 0.5 }}>
+                    <ListItemAvatar sx={{ minWidth: 28 }}>
+                      <Avatar sx={{ width: 22, height: 22 }} variant="rounded" src={tab.favIconUrl || undefined}>
+                        {(tab.title || tab.url || "?").slice(0, 1)}
+                      </Avatar>
+                    </ListItemAvatar>
+                    <ListItemText
+                      primary={tab.title || tab.url}
+                      secondary={isPersistent(key) ? new URL(tab.url).host : "this session only"}
+                      primaryTypographyProps={{
+                        noWrap: true,
+                        sx: { fontSize: "0.85rem", overflow: "hidden", textOverflow: "ellipsis" },
+                      }}
+                      secondaryTypographyProps={{ noWrap: true, sx: { fontSize: "0.7rem", opacity: 0.55 } }}
+                    />
+                  </Box>
+                  <VolumeSlider
+                    tabId={tab.id}
+                    value={percentForTab(tab)}
+                    isMuted={muteStates[tab.id]}
+                    onLiveChange={handleLive}
+                    onCommitChange={handleCommit}
+                    onToggleMute={handleToggleMute}
+                    onReset={handleReset}
+                  />
+                </ListItem>
+              );
+            })}
+          </List>
+        </div>
       )}
-      <Box sx={{ p: 1, textAlign: "center", opacity: 0.7 }}>
+      <Box sx={{ p: 1, textAlign: "center", opacity: 0.6 }}>
         <Typography variant="caption">
-          v{chrome.runtime.getManifest().version}
+          v{chrome.runtime.getManifest ? chrome.runtime.getManifest().version : ""} · drag past 100% to boost
         </Typography>
       </Box>
-    </>
+    </Box>
   );
 }

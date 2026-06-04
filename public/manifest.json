@@ -1,7 +1,7 @@
 {
   "name": "TJ Volume Mixer",
-  "description": "Individual volume control for each chrome tab",
-  "version": "1.1.0",
+  "description": "Per-tab volume control and boost (up to 600%) for Chrome",
+  "version": "2.0.0",
   "manifest_version": 3,
   "permissions": [
     "tabs",
@@ -12,14 +12,12 @@
     "default_popup": "index.html",
     "default_title": "TJ Volume Mixer"
   },
-  "background": {
-    "service_worker": "js/background.js"
-  },
   "content_scripts": [
     {
       "matches": ["<all_urls>"],
-      "js": ["js/content.js"],
-      "run_at": "document_end"
+      "all_frames": true,
+      "js": ["js/volume-core.js", "js/content.js"],
+      "run_at": "document_start"
     }
   ],
   "icons": {
