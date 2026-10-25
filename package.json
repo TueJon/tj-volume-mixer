@@ -4,48 +4,27 @@
   "private": true,
   "dependencies": {
     "@emotion/react": "^11.14.0",
-    "@emotion/styled": "^11.14.0",
-    "@mui/icons-material": "^6.4.4",
-    "@mui/material": "^6.4.4",
-    "cra-template": "1.2.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "react-scripts": "5.0.1"
-  },
-  "overrides": {
-    "nth-check": "^2.1.1",
-    "css-select": "^4.3.0",
-    "svgo": "^2.8.4",
-    "postcss": "^8.5.31",
-    "serialize-javascript": "^7.0.5",
-    "underscore": "^1.13.8",
-    "uuid": "^11.1.1",
-    "jsonpath": "^1.1.1"
+    "@emotion/styled": "^11.14.1",
+    "@mui/icons-material": "^9.5.0",
+    "@mui/material": "^9.5.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
+    "dev": "vite build --watch --mode development",
+    "build": "vite build",
+    "lint": "eslint .",
+    "test": "npm run test:core",
     "test:core": "node --test test/*.test.js",
-    "eject": "react-scripts eject",
     "version": "node scripts/update-manifest-version.js && git add public/manifest.json"
   },
-  "eslintConfig": {
-    "extends": [
-      "react-app",
-      "react-app/jest"
-    ]
-  },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@vitejs/plugin-react": "^6.1.2",
+    "eslint": "^10.13.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "vite": "^8.3.5"
   }
 }
