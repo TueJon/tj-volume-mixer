@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   List,
   ListItem,
@@ -166,7 +166,7 @@ export default function Popup() {
               const key = keyForTab(tab);
               return (
                 <ListItem key={tab.id} className="list-item" disablePadding sx={{ flexDirection: "column", alignItems: "stretch", py: 0.5 }}>
-                  <Box display="flex" alignItems="center" gap={1} sx={{ minWidth: 0, mb: 0.5 }}>
+                  <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 0, mb: 0.5 }}>
                     <ListItemAvatar sx={{ minWidth: 28 }}>
                       <Avatar sx={{ width: 22, height: 22 }} variant="rounded" src={tab.favIconUrl || undefined}>
                         {(tab.title || tab.url || "?").slice(0, 1)}
@@ -175,11 +175,13 @@ export default function Popup() {
                     <ListItemText
                       primary={tab.title || tab.url}
                       secondary={isPersistent(key) ? new URL(tab.url).host : "this session only"}
-                      primaryTypographyProps={{
-                        noWrap: true,
-                        sx: { fontSize: "0.85rem", overflow: "hidden", textOverflow: "ellipsis" },
+                      slotProps={{
+                        primary: {
+                          noWrap: true,
+                          sx: { fontSize: "0.85rem", overflow: "hidden", textOverflow: "ellipsis" },
+                        },
+                        secondary: { noWrap: true, sx: { fontSize: "0.7rem", opacity: 0.55 } },
                       }}
-                      secondaryTypographyProps={{ noWrap: true, sx: { fontSize: "0.7rem", opacity: 0.55 } }}
                     />
                   </Box>
                   <VolumeSlider

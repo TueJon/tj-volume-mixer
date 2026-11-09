@@ -9,12 +9,14 @@
       content="Tabs volume mixer Chrome extension by @TueJon"
     />
 
-    <link rel="manifest" href="%PUBLIC_URL%/manifest.json" />
-    <script src="%PUBLIC_URL%/js/volume-core.js"></script>
+    <link rel="manifest" href="/manifest.json" />
+    <!-- Classic script from public/: must run before the popup bundle, which reads window.TJVolumeCore at load. -->
+    <script src="/js/volume-core.js"></script>
     <title>Chrome tabs volume mixer</title>
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
+    <script type="module" src="/src/index.jsx"></script>
   </body>
 </html>

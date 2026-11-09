@@ -22,14 +22,17 @@ tab comes back at the level you left it.
   tested with `npm run test:core`. Shipped both as a content script and inside the popup.
 - `public/js/content.js` — runs in every frame; applies the saved level to all media,
   observes for new media, and stays in sync with the popup and storage.
-- `src/` — the React + MUI popup UI.
+- `index.html` + `src/` — the React + MUI popup UI, bundled with Vite. Everything in
+  `public/` (manifest, content scripts, icons) is copied to `build/` unchanged.
 
 There is no background service worker — it is not needed.
 
 ## Develop
 ```bash
 npm install
-npm run build        # outputs the unpacked extension to build/
+npm run build        # Vite build: outputs the unpacked extension to build/
+npm run dev          # rebuild build/ on every change (reload the extension in Chrome)
+npm run lint         # ESLint
 npm run test:core    # pure-logic unit tests
 ```
 Load `build/` via `chrome://extensions` → *Developer mode* → *Load unpacked*.

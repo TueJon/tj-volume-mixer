@@ -41,7 +41,7 @@ const VolumeSlider = React.memo(function VolumeSlider({
   const boosted = local > 100;
 
   return (
-    <Box display="flex" alignItems="center" gap={1} width="100%">
+    <Box sx={{ display: "flex", alignItems: "center", gap: 1, width: "100%" }}>
       <Tooltip title={isMuted ? "Unmute tab" : "Mute tab"}>
         <IconButton size="small" color={isMuted ? "default" : "primary"} onClick={() => onToggleMute(tabId)}>
           {isMuted ? <VolumeOffIcon fontSize="small" /> : <VolumeUpIcon fontSize="small" />}
